@@ -1,0 +1,26 @@
+# PlatformIO
+.pio/
+.vscode/
+build/
+*.o
+*.elf
+*.bin
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.env
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Wi‑Fi password
+src/wifi_credentials.h
