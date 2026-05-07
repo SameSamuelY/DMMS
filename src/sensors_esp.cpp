@@ -110,8 +110,6 @@ float getFlexAngle(int adc_val, float r_divider, float r_straight, float r_bent)
 // ------------------------------------------------------------
 // Wi-Fi and TCP server
 // ------------------------------------------------------------
-static const char *WIFI_SSID = WIFI_SSID;
-static const char *WIFI_PASS = WIFI_PASS;
 #define TCP_PORT 1234
 
 static int server_sock = -1;
