@@ -17,5 +17,5 @@ pip install matplotlib
 ```
 
 ```
-python plot.py
+python src/plot.py
 ```
