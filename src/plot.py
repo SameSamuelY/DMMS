@@ -36,8 +36,8 @@ def read_data():
                 print("Connection lost.")
                 break
             buffer += data.decode(errors='replace')
-            while '\n' in buffer:
-                line, buffer = buffer.split('\n', 1)
+            while '\r\n' in buffer:
+                line, buffer = buffer.split('\r\n', 1)
                 line = line.strip()
                 if not line:
                     continue

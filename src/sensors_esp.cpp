@@ -1,8 +1,10 @@
 // ESP32 ESP-IDF version
 #include <stdio.h>
 #include <cstring>
+#include <algorithm>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <esp_adc/adc_oneshot.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
@@ -12,6 +14,7 @@
 #include <lwip/sockets.h>
 #include <lwip/netdb.h>
 #include "wifi_credentials.h" // Wi‑Fi credentials (not committed to Git)
+#include "calibration.h"
 
 // ------------------------------------------------------------
 // Sensor configuration
@@ -25,17 +28,17 @@ const float VCC = 3.3;
 const int ADC_MAX = 4095;
 const float R_DIV_FSR = 5000.0;
 const float R_DIV_FLEX = 50000.0;
-// const float FLEX_R_STRAIGHT = 23130.0;
-// const float FLEX_R_BENT = 46400.0;
 const float MAX_BEND_ANGLE = 180.0;
+// const float FLEX_R_STRAIGHT_FALLBACK = 23130.0;
+// const float FLEX_R_BENT_FALLBACK = 46400.0;
 
 // Flex 0
-const float FLEX0_R_STRAIGHT = 41000.0;   // from your measurement
-const float FLEX0_R_BENT     = 107500.0;   // at 90° (or use fully bent value)
+const float FLEX0_R_STRAIGHT = 41000.0; // from your measurement
+const float FLEX0_R_BENT = 107500.0;    // at 90° (or use fully bent value)
 
 // Flex 1
-const float FLEX1_R_STRAIGHT = 70450.0;   // 1700 → Vout 1.370 V → R ≈ 70.45 k
-const float FLEX1_R_BENT     = 265000.0;   // 650 → Vout 0.524 V → R ≈ 265 k
+const float FLEX1_R_STRAIGHT = 70450.0; // 1700 → Vout 1.370 V → R ≈ 70.45 k
+const float FLEX1_R_BENT = 265000.0;    // 650 → Vout 0.524 V → R ≈ 265 k
 
 adc_oneshot_unit_handle_t adc_handle;
 static adc_cali_handle_t cali_handle = NULL;
@@ -113,7 +116,8 @@ float getFlexAngle(int adc_val, float r_divider, float r_straight, float r_bent)
 #define TCP_PORT 1234
 
 static int server_sock = -1;
-static int client_sock = -1;
+int client_sock = -1;
+SemaphoreHandle_t sock_mutex = NULL;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
@@ -192,25 +196,57 @@ static void tcp_server_task(void *arg)
 
     printf("TCP server listening on port %d\n", TCP_PORT);
 
+    char rx_buffer[64];
     while (1)
     {
         struct sockaddr_in client_addr;
         socklen_t addr_len = sizeof(client_addr);
-        client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &addr_len);
-        if (client_sock >= 0)
+        int new_sock = accept(server_sock, (struct sockaddr *)&client_addr, &addr_len);
+        if (new_sock >= 0)
         {
+            xSemaphoreTake(sock_mutex, portMAX_DELAY);
+            if (client_sock >= 0)
+            {
+                close(client_sock); // replace previous client
+            }
+            client_sock = new_sock;
+            xSemaphoreGive(sock_mutex);
             printf("Client connected\n");
-        }
-        // Wait for next connection (after disconnect)
-        while (client_sock >= 0)
-        {
-            vTaskDelay(pdMS_TO_TICKS(500));
+
+            // Command loop (unchanged)
+            char rx_buffer[64];
+            while (1)
+            {
+                int len = recv(client_sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+                if (len <= 0)
+                    break;
+                rx_buffer[len] = '\0';
+                char *cmd = strtok(rx_buffer, "\r\n");
+                if (cmd && cmd[strlen(cmd) - 1] == '\r')
+                    cmd[strlen(cmd) - 1] = '\0';
+                while (cmd != NULL)
+                {
+                    if (strlen(cmd) > 0) // skip empty strings (e.g., leading \r\n)
+                    {
+                        printf("CMD: '%s'\n", cmd);
+                        process_command(cmd);
+                    }
+                    cmd = strtok(NULL, "\r\n");
+                }
+            }
+            // Client disconnected
+            xSemaphoreTake(sock_mutex, portMAX_DELAY);
+            close(client_sock);
+            client_sock = -1;
+            xSemaphoreGive(sock_mutex);
+            printf("Client disconnected\n");
         }
     }
 }
 
 static void send_data(const char *str)
 {
+    xSemaphoreTake(sock_mutex, portMAX_DELAY);
     if (client_sock >= 0)
     {
         int len = strlen(str);
@@ -221,6 +257,7 @@ static void send_data(const char *str)
             client_sock = -1;
         }
     }
+    xSemaphoreGive(sock_mutex);
 }
 
 // ------------------------------------------------------------
@@ -230,13 +267,30 @@ static void sensor_task(void *arg)
 {
     while (true)
     {
+        if (!streaming_enabled)
+        {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
         int fsr_adc = readAverage(FSR_CHANNEL, 10);
+        float force_N = getNewtonForce(fsr_adc, R_DIV_FSR);
+
         int flex0_adc = readAverage(FLEX_0_CHANNEL, 10);
         int flex1_adc = readAverage(FLEX_1_CHANNEL, 10);
 
-        float force_N = getNewtonForce(fsr_adc, R_DIV_FSR);
-        float flex0_deg = getFlexAngle(flex0_adc, R_DIV_FLEX, FLEX0_R_STRAIGHT, FLEX0_R_BENT);
-        float flex1_deg = getFlexAngle(flex1_adc, R_DIV_FLEX, FLEX1_R_STRAIGHT, FLEX1_R_BENT);
+        float flex0_deg = get_calibrated_angle(flex0_adc, calib_flex0);
+        if (flex0_deg < 0)
+        {
+            // Fallback to old method
+            flex0_deg = getFlexAngle(flex0_adc, R_DIV_FLEX, FLEX0_R_STRAIGHT, FLEX0_R_BENT);
+        }
+
+        float flex1_deg = get_calibrated_angle(flex1_adc, calib_flex1);
+        if (flex1_deg < 0)
+        {
+            flex1_deg = getFlexAngle(flex1_adc, R_DIV_FLEX, FLEX1_R_STRAIGHT, FLEX1_R_BENT);
+        }
 
         // Serial output (debug)
         printf("FSR:%.2f N, Flex0:%04i => %.2f deg, Flex1:%04i => %.2f deg\n",
@@ -244,9 +298,9 @@ static void sensor_task(void *arg)
 
         // Wi-Fi output
         char buf[128];
-        snprintf(buf, sizeof(buf), 
-                "FSR:%.2f N, Flex0:%04i => %.2f deg, Flex1:%04i => %.2f deg\n",
-                force_N, flex0_adc, flex0_deg, flex1_adc, flex1_deg);
+        snprintf(buf, sizeof(buf),
+                 "FSR:%.2f N, Flex0:%04i => %.2f deg, Flex1:%04i => %.2f deg\r\n",
+                 force_N, flex0_adc, flex0_deg, flex1_adc, flex1_deg);
         send_data(buf);
 
         vTaskDelay(pdMS_TO_TICKS(DELAY_MS));
@@ -288,12 +342,18 @@ extern "C" void app_main()
         cali_handle = NULL;
     }
 
+    // Load stored calibration tables from NVS
+    load_calibration_from_nvs();
+
+    // Create mutex for socket access
+    sock_mutex = xSemaphoreCreateMutex();
+
     // Initialize Wi‑Fi
     wifi_init_sta();
 
     // Start TCP server task
-    xTaskCreate(tcp_server_task, "tcp_server", 4096, NULL, 5, NULL);
+    xTaskCreate(tcp_server_task, "tcp_server", 8192, NULL, 5, NULL);
 
     // Create sensor task
-    xTaskCreate(sensor_task, "sensor_task", 4096, NULL, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(sensor_task, "sensor_task", 8192, NULL, tskIDLE_PRIORITY + 1, NULL);
 }
