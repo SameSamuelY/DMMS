@@ -16,31 +16,11 @@
 #include "wifi_credentials.h" // Wi‑Fi credentials (not committed to Git)
 #include "calibration.h"
 #include <driver/gpio.h>
+#include "mux_config.h"
 
 // ------------------------------------------------------------
 // Sensor configuration
 // ------------------------------------------------------------
-
-// --- Multiplexer configuration ---
-// The mux output connects to a single ADC channel (e.g., GPIO32 = ADC_CHANNEL_4)
-const adc_channel_t MUX_ADC_CHANNEL = ADC_CHANNEL_4;   // reuse the pin you already had for FSR
-
-// Mux select lines (S0, S1, S2, S3) – choose any free GPIOs
-const int MUX_S0 = 13;   // example GPIOs
-const int MUX_S1 = 12;
-const int MUX_S2 = 14;
-const int MUX_S3 = 27;
-const int MUX_EN  = 26;  // if you use the enable pin, else tie EN to GND
-
-// Sensor channels on the multiplexer
-const int MUX_CH_FSR    = 0;
-const int MUX_CH_FLEX_0  = 1;
-const int MUX_CH_FLEX_1  = 2;
-// ... add up to 15 sensors later
-
-// const adc_channel_t FSR_CHANNEL = ADC_CHANNEL_4;    // GPIO32
-// const adc_channel_t FLEX_0_CHANNEL = ADC_CHANNEL_6; // GPIO34
-// const adc_channel_t FLEX_1_CHANNEL = ADC_CHANNEL_7; // GPIO35
 const adc_unit_t ADC_UNIT = ADC_UNIT_1;
 
 const int DELAY_MS = 100;

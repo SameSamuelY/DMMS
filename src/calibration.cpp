@@ -9,18 +9,14 @@
 #include <cstring>
 #include <algorithm>
 #include <esp_adc/adc_oneshot.h>
+#include <driver/gpio.h>
+#include "mux_config.h"
 
 // --- External references ---
-extern const int MUX_S0, MUX_S1, MUX_S2, MUX_S3, MUX_EN;
-extern const adc_channel_t MUX_ADC_CHANNEL;
-
 extern adc_oneshot_unit_handle_t adc_handle;
 extern int client_sock; // from sensors_esp.cpp
 extern SemaphoreHandle_t sock_mutex;
-
 extern void select_mux_channel(int channel);
-const int MUX_CH_FLEX_0 = 1;
-const int MUX_CH_FLEX_1 = 2;
 
 // Calibration tables (active)
 std::vector<CalPoint> calib_flex0;
