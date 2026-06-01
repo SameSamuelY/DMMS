@@ -15,14 +15,34 @@
 #include <lwip/netdb.h>
 #include "wifi_credentials.h" // Wi‑Fi credentials (not committed to Git)
 #include "calibration.h"
+#include <driver/gpio.h>
 
 // ------------------------------------------------------------
 // Sensor configuration
 // ------------------------------------------------------------
-const adc_channel_t FSR_CHANNEL = ADC_CHANNEL_4;    // GPIO32
-const adc_channel_t FLEX_0_CHANNEL = ADC_CHANNEL_6; // GPIO34
-const adc_channel_t FLEX_1_CHANNEL = ADC_CHANNEL_7; // GPIO35
+
+// --- Multiplexer configuration ---
+// The mux output connects to a single ADC channel (e.g., GPIO32 = ADC_CHANNEL_4)
+const adc_channel_t MUX_ADC_CHANNEL = ADC_CHANNEL_4;   // reuse the pin you already had for FSR
+
+// Mux select lines (S0, S1, S2, S3) – choose any free GPIOs
+const int MUX_S0 = 13;   // example GPIOs
+const int MUX_S1 = 12;
+const int MUX_S2 = 14;
+const int MUX_S3 = 27;
+const int MUX_EN  = 26;  // if you use the enable pin, else tie EN to GND
+
+// Sensor channels on the multiplexer
+const int MUX_CH_FSR    = 0;
+const int MUX_CH_FLEX_0  = 1;
+const int MUX_CH_FLEX_1  = 2;
+// ... add up to 15 sensors later
+
+// const adc_channel_t FSR_CHANNEL = ADC_CHANNEL_4;    // GPIO32
+// const adc_channel_t FLEX_0_CHANNEL = ADC_CHANNEL_6; // GPIO34
+// const adc_channel_t FLEX_1_CHANNEL = ADC_CHANNEL_7; // GPIO35
 const adc_unit_t ADC_UNIT = ADC_UNIT_1;
+
 const int DELAY_MS = 100;
 const float VCC = 3.3;
 const int ADC_MAX = 4095;
@@ -43,6 +63,62 @@ const float FLEX1_R_BENT = 265000.0;    // 650 → Vout 0.524 V → R ≈ 265�
 adc_oneshot_unit_handle_t adc_handle;
 static adc_cali_handle_t cali_handle = NULL;
 
+void init_multiplexer() {
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << MUX_S0) | (1ULL << MUX_S1) | (1ULL << MUX_S2) | (1ULL << MUX_S3) | (1ULL << MUX_EN),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    // Disable mux initially (if EN pin active low)
+    gpio_set_level(MUX_EN, 1);  // high = disable (check your mux datasheet)
+}
+
+// Set the mux to a specific channel
+void select_mux_channel(int channel) {
+    gpio_set_level(MUX_EN, 0);                    // enable mux
+    gpio_set_level(MUX_S0, channel & 0x01);
+    gpio_set_level(MUX_S1, (channel >> 1) & 0x01);
+    gpio_set_level(MUX_S2, (channel >> 2) & 0x01);
+    gpio_set_level(MUX_S3, (channel >> 3) & 0x01);
+    vTaskDelay(pdMS_TO_TICKS(1));                 // settling time (1 ms is safe)
+}
+
+// Read one raw ADC sample from a mux channel
+int read_mux_channel(int channel) {
+    select_mux_channel(channel);
+    int raw;
+    adc_oneshot_read(adc_handle, MUX_ADC_CHANNEL, &raw);
+    return raw;
+}
+
+// Replacement for readAverage: average n readings from a mux channel
+int readAverageMux(int channel, int n) {
+    long sum = 0;
+    for (int i = 0; i < n; i++) {
+        int raw = read_mux_channel(channel);
+        sum += raw;
+        vTaskDelay(pdMS_TO_TICKS(1));   // time between samples
+    }
+    return sum / n;
+}
+
+// int readAverage(adc_channel_t channel, int n)
+// {
+//     long sum = 0;
+//     int raw;
+//     for (int i = 0; i < n; i++)
+//     {
+//         adc_oneshot_read(adc_handle, channel, &raw);
+//         sum += raw;
+//         vTaskDelay(pdMS_TO_TICKS(1));
+//     }
+//     return sum / n;
+// }
+
 float constrain(float value, float min_val, float max_val)
 {
     if (value < min_val)
@@ -50,19 +126,6 @@ float constrain(float value, float min_val, float max_val)
     if (value > max_val)
         return max_val;
     return value;
-}
-
-int readAverage(adc_channel_t channel, int n)
-{
-    long sum = 0;
-    int raw;
-    for (int i = 0; i < n; i++)
-    {
-        adc_oneshot_read(adc_handle, channel, &raw);
-        sum += raw;
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-    return sum / n;
 }
 
 float get_voltage_from_adc(int raw)
@@ -196,7 +259,6 @@ static void tcp_server_task(void *arg)
 
     printf("TCP server listening on port %d\n", TCP_PORT);
 
-    char rx_buffer[64];
     while (1)
     {
         struct sockaddr_in client_addr;
@@ -273,11 +335,11 @@ static void sensor_task(void *arg)
             continue;
         }
 
-        int fsr_adc = readAverage(FSR_CHANNEL, 10);
+        int fsr_adc = readAverageMux(MUX_CH_FSR, 10);
         float force_N = getNewtonForce(fsr_adc, R_DIV_FSR);
 
-        int flex0_adc = readAverage(FLEX_0_CHANNEL, 10);
-        int flex1_adc = readAverage(FLEX_1_CHANNEL, 10);
+        int flex0_adc = readAverageMux(MUX_CH_FLEX_0, 10);
+        int flex1_adc = readAverageMux(MUX_CH_FLEX_1, 10);
 
         float flex0_deg = get_calibrated_angle(flex0_adc, calib_flex0);
         if (flex0_deg < 0)
@@ -324,9 +386,9 @@ extern "C" void app_main()
         .atten = ADC_ATTEN_DB_12,
         .bitwidth = ADC_BITWIDTH_12,
     };
-    adc_oneshot_config_channel(adc_handle, FSR_CHANNEL, &chan_config);
-    adc_oneshot_config_channel(adc_handle, FLEX_0_CHANNEL, &chan_config);
-    adc_oneshot_config_channel(adc_handle, FLEX_1_CHANNEL, &chan_config);
+    adc_oneshot_config_channel(adc_handle, MUX_ADC_CHANNEL, &chan_config);
+
+    init_multiplexer();
 
     // === ADC calibration (line fitting) ===
     adc_cali_line_fitting_config_t cali_config = {

@@ -11,9 +11,16 @@
 #include <esp_adc/adc_oneshot.h>
 
 // --- External references ---
+extern const int MUX_S0, MUX_S1, MUX_S2, MUX_S3, MUX_EN;
+extern const adc_channel_t MUX_ADC_CHANNEL;
+
 extern adc_oneshot_unit_handle_t adc_handle;
 extern int client_sock; // from sensors_esp.cpp
 extern SemaphoreHandle_t sock_mutex;
+
+extern void select_mux_channel(int channel);
+const int MUX_CH_FLEX_0 = 1;
+const int MUX_CH_FLEX_1 = 2;
 
 // Calibration tables (active)
 std::vector<CalPoint> calib_flex0;
@@ -46,10 +53,18 @@ void send_response(const char *msg)
 }
 
 // Single raw reading (for calibration)
-int read_sensor_raw(int channel)
+// int read_sensor_raw(int channel)
+// {
+//     int raw;
+//     adc_oneshot_read(adc_handle, (adc_channel_t)channel, &raw);
+//     return raw;
+// }
+
+int read_sensor_raw(int mux_channel)
 {
+    select_mux_channel(mux_channel);
     int raw;
-    adc_oneshot_read(adc_handle, (adc_channel_t)channel, &raw);
+    adc_oneshot_read(adc_handle, MUX_ADC_CHANNEL, &raw);
     return raw;
 }
 
@@ -174,7 +189,7 @@ void process_command(const char *cmd)
     else if (strncmp(cmd, "CAL:RECORD_FLEX0 ", 17) == 0)
     {
         float angle = atof(cmd + 17);
-        int raw = read_sensor_raw(6); // FLEX_0_CHANNEL = ADC_CHANNEL_6
+        int raw = read_sensor_raw(MUX_CH_FLEX_0); // FLEX_0_CHANNEL = ADC_CHANNEL_6
         calib_buffer0.push_back({raw, angle});
         char resp[64];
         snprintf(resp, sizeof(resp), "OK:%d@%.1f", raw, angle);
@@ -183,7 +198,7 @@ void process_command(const char *cmd)
     else if (strncmp(cmd, "CAL:RECORD_FLEX1 ", 17) == 0)
     {
         float angle = atof(cmd + 17);
-        int raw = read_sensor_raw(7); // FLEX_1_CHANNEL = ADC_CHANNEL_7
+        int raw = read_sensor_raw(MUX_CH_FLEX_1); // FLEX_1_CHANNEL = ADC_CHANNEL_7
         calib_buffer1.push_back({raw, angle});
         char resp[64];
         snprintf(resp, sizeof(resp), "OK:%d@%.1f", raw, angle);
@@ -250,13 +265,16 @@ float get_calibrated_angle(int raw, const std::vector<CalPoint> &calib)
     return 0; // should never reach
 }
 
-void send_calibration_info(void) {
+void send_calibration_info(void)
+{
     std::string dump = "Calibration loaded: Flex0=";
-    for (auto& p : calib_flex0) {
+    for (auto &p : calib_flex0)
+    {
         dump += std::to_string(p.raw) + "->" + std::to_string(p.angle) + " ";
     }
     dump += "| Flex1=";
-    for (auto& p : calib_flex1) {
+    for (auto &p : calib_flex1)
+    {
         dump += std::to_string(p.raw) + "->" + std::to_string(p.angle) + " ";
     }
     send_response(dump.c_str());
